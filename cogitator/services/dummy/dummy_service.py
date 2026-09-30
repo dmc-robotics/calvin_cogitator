@@ -1,4 +1,4 @@
-"""Generates fake sensor data and publishes to ZMQ bus — drop-in replacement for serial service."""
+"""Generates fake Teensy data and publishes to ZMQ bus — drop-in replacement for serial service."""
 
 import json
 import logging
@@ -8,110 +8,69 @@ import time
 
 import zmq
 
-from config.settings import (
-    ZMQ_PUB_ADDR, ZMQ_SUB_ADDR, MESSAGE_TYPE_TO_TOPIC,
-    TOPIC_CMD_PID, TOPIC_RSP_PID, TOPIC_CMD_PID_READ, TOPIC_RSP_PID_READ,
-)
+from config.settings import ZMQ_PUBLISH_ADDRESS, MESSAGE_TYPE_TO_TOPIC
 
 log = logging.getLogger("dummy")
 
-PUBLISH_HZ = 50  # roughly match real IMU rate
-
-# Default PID values returned for read requests in dummy mode
-DEFAULT_PID = {
-    "inner": {"kp": 1.0, "ki": 0.0, "kd": 0.0},
-    "outer": {"kp": 1.0, "ki": 0.0, "kd": 0.0},
-}
+PUBLISH_HERTZ = 50  # match real telemetry rate
 
 
-def generate_imu(t: float) -> dict:
-    """Simulate a balancing robot with gentle oscillation."""
+def generate_telemetry(elapsed: float, loop_count: int) -> dict:
+    """Simulate balance telemetry per PROTOCOL.md."""
     return {
-        "type": "imu",
-        "ax": 0.05 * math.sin(t * 2) + random.gauss(0, 0.01),
-        "ay": random.gauss(0, 0.01),
-        "az": 9.81 + random.gauss(0, 0.02),
-        "gx": 0.3 * math.sin(t * 3) + random.gauss(0, 0.05),
-        "gy": random.gauss(0, 0.05),
-        "gz": random.gauss(0, 0.02),
+        "type": "telemetry",
+        "ms": int(elapsed * 1000) % (2**32),
+        "tilt": 0.5 * math.sin(elapsed * 2) + random.gauss(0, 0.1),
+        "tiltRate": 0.3 * math.cos(elapsed * 3) + random.gauss(0, 0.05),
+        "targetVel": 0.0,
+        "motorL": 0.0,
+        "motorR": 0.0,
+        "loopCount": loop_count,
     }
 
 
-def generate_tof(t: float) -> dict:
-    """Simulate slowly varying distance readings."""
+def generate_log(elapsed: float) -> dict:
+    """Simulate periodic log messages per PROTOCOL.md."""
     return {
-        "type": "tof",
-        "front": int(300 + 150 * math.sin(t * 0.5) + random.gauss(0, 5)),
-        "rear": int(400 + 100 * math.cos(t * 0.3) + random.gauss(0, 5)),
-    }
-
-
-def generate_i2c_health() -> dict:
-    """Mostly zeros with rare glitches."""
-    return {
-        "type": "i2c_health",
-        "nacks": 1 if random.random() < 0.01 else 0,
-        "timeouts": 1 if random.random() < 0.005 else 0,
-        "resets": 0,
+        "type": "log",
+        "ms": int(elapsed * 1000) % (2**32),
+        "level": "INFO",
+        "msg": "heartbeat",
     }
 
 
 def main():
-    ctx = zmq.Context()
+    context = zmq.Context()
 
-    pub = ctx.socket(zmq.PUB)
-    pub.connect(ZMQ_PUB_ADDR)
+    publisher = context.socket(zmq.PUB)
+    publisher.connect(ZMQ_PUBLISH_ADDRESS)
 
-    sub = ctx.socket(zmq.SUB)
-    sub.connect(ZMQ_SUB_ADDR)
-    sub.subscribe(TOPIC_CMD_PID.encode())
-    sub.subscribe(TOPIC_CMD_PID_READ.encode())
+    log.info("publishing to %s at ~%d Hz", ZMQ_PUBLISH_ADDRESS, PUBLISH_HERTZ)
 
-    poller = zmq.Poller()
-    poller.register(sub, zmq.POLLIN)
-
-    log.info("publishing to %s at ~%d Hz", ZMQ_PUB_ADDR, PUBLISH_HZ)
-    log.info("listening for %s commands", TOPIC_CMD_PID)
-
-    interval = 1.0 / PUBLISH_HZ
+    interval = 1.0 / PUBLISH_HERTZ
     tick = 0
+    loop_count = 0
     next_tick = time.monotonic()
+
+    # Send startup log message
+    startup = {"type": "log", "ms": 0, "level": "INFO", "msg": "Instinctus awakens. (dummy)"}
+    publisher.send_multipart([MESSAGE_TYPE_TO_TOPIC["log"].encode(), json.dumps(startup).encode()])
 
     try:
         while True:
-            t = time.monotonic()
+            elapsed = time.monotonic()
+            loop_count += 20  # simulate 1kHz ISR running 20x per 50Hz tick
 
-            # IMU every tick
-            msg = generate_imu(t)
-            topic = MESSAGE_TYPE_TO_TOPIC[msg["type"]]
-            pub.send_multipart([topic.encode(), json.dumps(msg).encode()])
+            # Telemetry every tick (50 Hz)
+            message = generate_telemetry(elapsed, loop_count)
+            topic = MESSAGE_TYPE_TO_TOPIC[message["type"]]
+            publisher.send_multipart([topic.encode(), json.dumps(message).encode()])
 
-            # ToF every 5th tick (~10 Hz)
-            if tick % 5 == 0:
-                msg = generate_tof(t)
-                topic = MESSAGE_TYPE_TO_TOPIC[msg["type"]]
-                pub.send_multipart([topic.encode(), json.dumps(msg).encode()])
-
-            # I2C health every 50th tick (~1 Hz)
+            # Log heartbeat every 50 ticks (~1 Hz)
             if tick % 50 == 0:
-                msg = generate_i2c_health()
-                topic = MESSAGE_TYPE_TO_TOPIC[msg["type"]]
-                pub.send_multipart([topic.encode(), json.dumps(msg).encode()])
-
-            # Check for incoming commands (non-blocking)
-            events = dict(poller.poll(0))
-            if sub in events:
-                topic_bytes, payload_bytes = sub.recv_multipart()
-                cmd_topic = topic_bytes.decode()
-                data = json.loads(payload_bytes.decode())
-
-                if cmd_topic == TOPIC_CMD_PID:
-                    log.info("got PID command: %s", data)
-                    response = {**data, "status": "confirmed"}
-                    pub.send_multipart([TOPIC_RSP_PID.encode(), json.dumps(response).encode()])
-                elif cmd_topic == TOPIC_CMD_PID_READ:
-                    log.info("got PID read request")
-                    pub.send_multipart([TOPIC_RSP_PID_READ.encode(), json.dumps(DEFAULT_PID).encode()])
+                message = generate_log(elapsed)
+                topic = MESSAGE_TYPE_TO_TOPIC[message["type"]]
+                publisher.send_multipart([topic.encode(), json.dumps(message).encode()])
 
             tick += 1
             next_tick += interval
@@ -119,9 +78,8 @@ def main():
     except KeyboardInterrupt:
         pass
     finally:
-        sub.close()
-        pub.close()
-        ctx.term()
+        publisher.close()
+        context.term()
 
 
 if __name__ == "__main__":

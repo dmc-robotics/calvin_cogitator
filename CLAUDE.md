@@ -7,7 +7,7 @@
 **Calvin's Three-System Architecture:**
 - **instinctus** - Low-level reflexes and motor control- `/Users/damoncali/code/arduino/calvin_instinctus/CLAUDE.md`
 - **cogitator** (THIS SYSTEM) - High-level thinking and AI (Jetson Orin Nano)
-- **explorator** - Human monitoring interface (Electron app) - `/Users/damoncali/code/calvin_explorator/CLAUDE.md`
+- **explorator** - Human monitoring interface (native macOS app) - `/Users/damoncali/code/robotics/calvin/calvin_explorator/CLAUDE.md`
 
 **Integration:**
 - Receives status from instinctus M7 core via serial
@@ -63,35 +63,55 @@ calvin_cogitator/
 │       ├── serial/
 │       │   └── serial_service.py    # Reads Teensy UART, publishes to ZMQ bus
 │       └── dummy/
-│           └── dummy_service.py     # Generates fake sensor data for testing
+│           └── dummy_service.py     # Generates fake Teensy data for testing
+└── systemd/
+    ├── install.sh                   # Installs and enables all systemd services
+    ├── SYSTEMD.md                   # Systemd setup and usage notes
+    ├── cogitator-broker.service
+    ├── cogitator-gateway.service
+    ├── cogitator-serial.service
+    └── cogitator-dummy.service
 ```
 
 ## Architecture
 
-- **ZMQ Broker** (`broker.py`): XPUB/XSUB proxy on ports 5550/5551 — all services publish/subscribe through it
-- **Serial Service**: Reads JSON messages from Teensy over UART, maps message types to ZMQ topics (`sensor.imu`, `sensor.tof`, `sensor.i2c_health`)
+### Services
+- **ZMQ Broker**: XPUB/XSUB proxy on ports 5550/5551 — all services publish/subscribe through it
 - **Gateway Service**: Bridges ZMQ subscriptions to WebSocket on port 5560 for explorator
-- **Dummy Service**: Replaces serial service with synthetic data for development/testing
-- **run.sh**: Launches broker + gateway + serial (or `--dummy`) as background processes
+- **Serial Service**: Reads JSON messages from Teensy over UART, maps message types to ZMQ topics
 
-## Message Format (initial, simple)
-Teensy sends newline-delimited JSON. Serial service republishes as-is with a topic prefix.
+### Development
+- **Dummy Service**: Replaces serial service with synthetic data for development/testing
+- **run.sh**: Launches broker + gateway + serial (or `--dummy`) as background processes for development
+
+### Production
+- Uses `systemd` services in `/systemd` to manage services on the Jetson
+
+
+## Message Format
+
+All messages are ZMQ multipart frames: `[topic, json_payload]`.
+
+### Teensy Messages (Teensy → serial service → ZMQ bus)
+Teensy sends newline-delimited JSON (see PROTOCOL.md). Serial service maps `type` field to a ZMQ topic and republishes.
+
+| Type        | ZMQ Topic            | Fields                                                              |
+|-------------|----------------------|---------------------------------------------------------------------|
+| `telemetry` | `sensor.telemetry`   | `ms`, `tilt` (deg), `tiltRate` (deg/s), `targetVel` (m/s), `motorL`, `motorR` (rad/s), `loopCount` |
+| `log`       | `instinctus.log`     | `ms`, `level` (DEBUG/INFO/WARN/ERROR), `msg`                       |
+| `event`     | `instinctus.event`   | `ms`, `event` (string), `data` (optional object)                   |
+| `ack`       | `instinctus.ack`     | `ms`, `cmd` (string), `ok` (bool), `msg` (optional)                |
 
 ```json
-{"type": "imu", "ax": 0.1, "ay": -0.02, "az": 9.8, "gx": 0.5, "gy": -0.1, "gz": 0.0}
-{"type": "tof", "front": 250, "rear": 180}
-{"type": "i2c_health", "nacks": 0, "timeouts": 0, "resets": 0}
+{"type":"telemetry","ms":12345,"tilt":1.23,"tiltRate":-0.45,"targetVel":0.0,"motorL":0.0,"motorR":0.0,"loopCount":12345}
+{"type":"log","ms":12345,"level":"INFO","msg":"Instinctus awakens."}
+{"type":"event","ms":12345,"event":"estop","data":{"reason":"tilt_limit"}}
+{"type":"ack","ms":12345,"cmd":"set_velocity","ok":true}
 ```
 
-## Implementation Plan
+### Gateway Forwarding
+The gateway forwards topics with prefixes `sensor.` and `instinctus.` to explorator via WebSocket.
 
-**Phase 1: (Complete)**
-- ZMQ broker
-- Gateway service (ZMQ bus → WebSocket)
-- Serial service (Teensy UART → ZMQ bus)
-- Dummy service (fake sensor data for testing)
-- test.html for gateway testing
+## Code Style
 
-
-
-**Phase 2: (TBD)**
+- Avoid abbreviations in variable, constant, function, and environment variable names. Prefer clarity over brevity (e.g. `publisher` not `pub`, `context` not `ctx`, `ZMQ_PUBLISH_ADDRESS` not `ZMQ_PUB_ADDR`, `COGITATOR_` not `COG_`).

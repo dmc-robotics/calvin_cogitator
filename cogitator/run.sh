@@ -28,9 +28,6 @@ if [[ "${1:-}" == "--dummy" ]]; then
 else
     python3 services/serial/serial_service.py &
     PIDS+=($!)
-
-    python3 services/pid/pid_service.py &
-    PIDS+=($!)
 fi
 
 python3 services/gateway/gateway_service.py &

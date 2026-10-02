@@ -5,7 +5,7 @@
 **Calvin Cogitator** is the high-level intelligence system for Calvin, a self-balancing robot. Running on a Jetson Orin Nano, it provides advanced AI capabilities including object recognition, motion planning, video/audio streaming, and LLM-based decision making.
 
 **Calvin's Three-System Architecture:**
-- **instinctus** - Low-level reflexes and motor control- `/Users/damoncali/code/arduino/calvin_instinctus/CLAUDE.md`
+- **instinctus** - Low-level reflexes and motor control- `/Users/damoncali/code/robotics/calvin/calvin_instinctus/CLAUDE.md`
 - **cogitator** (THIS SYSTEM) - High-level thinking and AI (Jetson Orin Nano)
 - **explorator** - Human monitoring interface (native macOS app) - `/Users/damoncali/code/robotics/calvin/calvin_explorator/CLAUDE.md`
 
